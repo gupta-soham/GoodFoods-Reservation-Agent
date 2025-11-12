@@ -1,0 +1,429 @@
+"""
+Reservation Agent implementation for the GoodFoods Reservation Agent.
+
+This module implements the core agent loop with tool calling capabilities
+for managing restaurant reservations through natural language interactions.
+"""
+
+from typing import Any, Dict, List, Generator, Optional
+from agent.openrouter_client import OpenRouterClient
+from mcp_server.server import MCPServer
+
+
+class ReservationAgent:
+    """
+    Conversational AI agent for restaurant reservations.
+    
+    Implements a custom agent loop with tool calling support, maintaining
+    conversation context and orchestrating interactions between the LLM
+    and the MCP Server.
+    """
+    
+    # Tool schemas formatted according to OpenAI function calling specification
+    TOOLS = [
+        {
+            "type": "function",
+            "function": {
+                "name": "search_restaurants",
+                "description": "Search for restaurants based on criteria such as cuisine type, location, party size, date, and time",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "cuisine": {
+                            "type": "string",
+                            "description": "Type of cuisine (e.g., Italian, Chinese, Japanese, Mexican)"
+                        },
+                        "location": {
+                            "type": "string",
+                            "description": "Geographic location or area (e.g., Downtown, Midtown, Uptown)"
+                        },
+                        "party_size": {
+                            "type": "integer",
+                            "description": "Number of guests in the party"
+                        },
+                        "date": {
+                            "type": "string",
+                            "description": "Reservation date in YYYY-MM-DD format"
+                        },
+                        "time": {
+                            "type": "string",
+                            "description": "Reservation time in HH:MM format (24-hour)"
+                        }
+                    },
+                    "required": []
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_availability",
+                "description": "Check availability for a specific restaurant at a given date and time",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "restaurant_id": {
+                            "type": "string",
+                            "description": "Unique identifier of the restaurant"
+                        },
+                        "date": {
+                            "type": "string",
+                            "description": "Reservation date in YYYY-MM-DD format"
+                        },
+                        "time": {
+                            "type": "string",
+                            "description": "Reservation time in HH:MM format (24-hour)"
+                        },
+                        "party_size": {
+                            "type": "integer",
+                            "description": "Number of guests in the party"
+                        }
+                    },
+                    "required": ["restaurant_id", "date", "time", "party_size"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "make_reservation",
+                "description": "Create a new reservation at a restaurant for a specific date, time, and party size",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "restaurant_id": {
+                            "type": "string",
+                            "description": "Unique identifier of the restaurant"
+                        },
+                        "date": {
+                            "type": "string",
+                            "description": "Reservation date in YYYY-MM-DD format"
+                        },
+                        "time": {
+                            "type": "string",
+                            "description": "Reservation time in HH:MM format (24-hour)"
+                        },
+                        "party_size": {
+                            "type": "integer",
+                            "description": "Number of guests in the party"
+                        },
+                        "customer_name": {
+                            "type": "string",
+                            "description": "Full name of the customer making the reservation"
+                        }
+                    },
+                    "required": ["restaurant_id", "date", "time", "party_size", "customer_name"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "cancel_reservation",
+                "description": "Cancel an existing reservation using the reservation ID",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "reservation_id": {
+                            "type": "string",
+                            "description": "Unique identifier of the reservation to cancel"
+                        }
+                    },
+                    "required": ["reservation_id"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_recommendations",
+                "description": "Get personalized restaurant recommendations based on user preferences",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "preferences": {
+                            "type": "object",
+                            "description": "User preferences for restaurant recommendations",
+                            "properties": {
+                                "cuisine": {
+                                    "type": "string",
+                                    "description": "Preferred cuisine type"
+                                },
+                                "location": {
+                                    "type": "string",
+                                    "description": "Preferred location or area"
+                                },
+                                "price_range": {
+                                    "type": "string",
+                                    "description": "Preferred price range ($, $$, $$$, $$$$)"
+                                },
+                                "min_rating": {
+                                    "type": "number",
+                                    "description": "Minimum rating (1.0 to 5.0)"
+                                }
+                            }
+                        }
+                    },
+                    "required": []
+                }
+            }
+        }
+    ]
+    
+    # System message to guide LLM behavior
+    SYSTEM_MESSAGE = {
+        "role": "system",
+        "content": """You are a helpful restaurant reservation assistant. Your role is to help users find restaurants, check availability, make reservations, and get recommendations.
+
+CRITICAL RULES:
+1. Use the available tools to gather information when needed
+2. After receiving tool results, YOU MUST provide a clear, natural language response to the user
+3. NEVER stop after calling a tool - always interpret the results and respond to the user
+4. Do NOT call the same tool multiple times unless the user asks for different criteria
+5. Format restaurant information in a readable way with key details
+6. For recommendations, present the top restaurants with their ratings, cuisine, and location
+
+Be conversational, helpful, and concise in your responses. Always complete your response to the user."""
+    }
+    
+    def __init__(self, mcp_server: MCPServer, openrouter_client: OpenRouterClient):
+        """
+        Initialize the Reservation Agent.
+        
+        Args:
+            mcp_server: MCP Server instance for tool execution
+            openrouter_client: OpenRouter client for LLM interactions
+        """
+        self.mcp_server = mcp_server
+        self.client = openrouter_client
+        # Initialize conversation history with system message
+        self.conversation_history: List[Dict[str, Any]] = [self.SYSTEM_MESSAGE]
+
+    def process_message(self, user_message: str) -> Generator[str, None, None]:
+        """
+        Process a user message and yield response chunks.
+        
+        Implements the agent loop with tool calling:
+        1. Add user message to conversation history
+        2. Call LLM with tools and conversation history
+        3. Handle tool calls if suggested by LLM
+        4. Stream final response to user
+        
+        Args:
+            user_message: The user's input message
+            
+        Yields:
+            Response chunks (text or status updates)
+        """
+        # Add user message to conversation history
+        self.conversation_history.append({
+            "role": "user",
+            "content": user_message
+        })
+        
+        # Agent loop - continue until we get a final text response
+        max_iterations = 5  # Prevent infinite loops
+        iteration = 0
+        
+        try:
+            while iteration < max_iterations:
+                iteration += 1
+                
+                # For tool calling rounds, use non-streaming
+                # For final response, use streaming
+                response = self.client.create_chat_completion(
+                    messages=self.conversation_history,
+                    tools=self.TOOLS,
+                    stream=False
+                )
+                
+                # Check if LLM wants to call tools
+                if "choices" in response and len(response["choices"]) > 0:
+                    choice = response["choices"][0]
+                    message = choice.get("message", {})
+                    
+                    # Check for tool calls
+                    tool_calls = message.get("tool_calls")
+                    
+                    if tool_calls:
+                        # Add assistant message with tool calls to history
+                        self.conversation_history.append({
+                            "role": "assistant",
+                            "content": message.get("content") or "",
+                            "tool_calls": tool_calls
+                        })
+                        
+                        # Yield status update
+                        tool_names = [tc.get("function", {}).get("name") for tc in tool_calls]
+                        yield f"Using tools: {', '.join(tool_names)}..."
+                        
+                        # Execute tools and get results, yielding tool call data
+                        tool_messages = []
+                        for tool_call in tool_calls:
+                            tool_id = tool_call.get("id")
+                            function_data = tool_call.get("function", {})
+                            tool_name = function_data.get("name")
+                            
+                            # Parse arguments
+                            import json
+                            try:
+                                arguments_str = function_data.get("arguments", "{}")
+                                arguments = json.loads(arguments_str)
+                            except json.JSONDecodeError:
+                                arguments = {}
+                            
+                            # Execute the tool
+                            result = self._execute_tool(tool_name, arguments)
+                            
+                            # Yield tool call data for UI display
+                            yield {
+                                "tool_name": tool_name,
+                                "arguments": arguments,
+                                "result": result
+                            }
+                            
+                            # Create tool message for conversation history
+                            tool_message = {
+                                "role": "tool",
+                                "tool_call_id": tool_id,
+                                "content": result
+                            }
+                            tool_messages.append(tool_message)
+                        
+                        # Add tool results to conversation history
+                        self.conversation_history.extend(tool_messages)
+                        
+                        # Continue loop to get final response
+                        continue
+                    else:
+                        # No tool calls, get streaming response for final answer
+                        # Make a streaming call for the final response
+                        stream_response = self.client.create_chat_completion(
+                            messages=self.conversation_history,
+                            tools=self.TOOLS,
+                            stream=True
+                        )
+                        
+                        # Accumulate the complete response
+                        complete_response = ""
+                        
+                        # Stream the response chunks
+                        for chunk in stream_response:
+                            if "choices" in chunk and len(chunk["choices"]) > 0:
+                                delta = chunk["choices"][0].get("delta", {})
+                                content_chunk = delta.get("content", "")
+                                
+                                if content_chunk:
+                                    complete_response += content_chunk
+                                    yield content_chunk
+                        
+                        # Add complete response to conversation history
+                        if complete_response:
+                            self.conversation_history.append({
+                                "role": "assistant",
+                                "content": complete_response
+                            })
+                        
+                        break
+                else:
+                    # Unexpected response format
+                    yield "I apologize, but I encountered an issue processing your request."
+                    break
+            
+            if iteration >= max_iterations:
+                yield "I apologize, but I'm having trouble completing your request. Please try rephrasing."
+        
+        except Exception as e:
+            error_message = f"Error processing message: {str(e)}"
+            yield error_message
+
+    def _execute_tool(self, tool_name: str, arguments: Dict[str, Any]) -> str:
+        """
+        Execute a tool via the MCP Server.
+        
+        Routes tool calls to the appropriate MCP Server method and returns
+        the formatted result.
+        
+        Args:
+            tool_name: Name of the tool to execute
+            arguments: Dictionary of tool arguments
+            
+        Returns:
+            Tool execution result as a string
+        """
+        try:
+            # Create MCP request
+            mcp_request = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": tool_name,
+                    "arguments": arguments
+                }
+            }
+            
+            # Execute tool via MCP Server
+            mcp_response = self.mcp_server.handle_request(mcp_request)
+            
+            # Check for errors
+            if "error" in mcp_response:
+                error_msg = mcp_response["error"].get("message", "Unknown error")
+                return f"Error executing {tool_name}: {error_msg}"
+            
+            # Extract result
+            result = mcp_response.get("result", {})
+            
+            # Format the result based on MCP response structure
+            if "content" in result:
+                # Extract text from content array
+                content_items = result["content"]
+                if isinstance(content_items, list) and len(content_items) > 0:
+                    return content_items[0].get("text", "No result")
+            
+            return str(result)
+        
+        except Exception as e:
+            return f"Error executing {tool_name}: {str(e)}"
+    
+    def _parse_and_execute_tools(self, tool_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Parse tool calls from LLM response and execute them.
+        
+        Handles multiple tool calls in parallel and formats results as
+        tool messages for the conversation history.
+        
+        Args:
+            tool_calls: List of tool call objects from LLM response
+            
+        Returns:
+            List of tool message objects to add to conversation history
+        """
+        tool_messages = []
+        
+        for tool_call in tool_calls:
+            tool_id = tool_call.get("id")
+            function_data = tool_call.get("function", {})
+            tool_name = function_data.get("name")
+            
+            # Parse arguments (they come as JSON string)
+            import json
+            try:
+                arguments_str = function_data.get("arguments", "{}")
+                arguments = json.loads(arguments_str)
+            except json.JSONDecodeError:
+                arguments = {}
+            
+            # Execute the tool
+            result = self._execute_tool(tool_name, arguments)
+            
+            # Create tool message
+            tool_message = {
+                "role": "tool",
+                "tool_call_id": tool_id,
+                "content": result
+            }
+            
+            tool_messages.append(tool_message)
+        
+        return tool_messages

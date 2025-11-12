@@ -1,0 +1,70 @@
+# Streamlit Configuration for GoodFoods Reservation Agent
+
+[theme]
+# Primary color for interactive elements
+primaryColor = "#FF6B6B"
+
+# Background color for the main content area
+backgroundColor = "#F8F9FA"
+
+# Background color for sidebar and most interactive widgets
+secondaryBackgroundColor = "#FFFFFF"
+
+# Color used for almost all text
+textColor = "#262730"
+
+# Font family for all text
+font = "sans serif"
+
+[server]
+# Port where the app runs
+port = 8501
+
+# If false, will attempt to open a browser window on start
+headless = false
+
+# Enables support for Cross-Origin Resource Sharing (CORS)
+enableCORS = false
+
+# Enables XSRF protection
+enableXsrfProtection = true
+
+# Max size, in megabytes, for files uploaded
+maxUploadSize = 200
+
+# Enables support for websocket compression
+enableWebsocketCompression = true
+
+[browser]
+# Internet address where users should point their browsers
+serverAddress = "localhost"
+
+# Whether to send usage statistics to Streamlit
+gatherUsageStats = false
+
+# Automatically rerun script when the file is modified on disk
+serverPort = 8501
+
+[runner]
+# Allows you to type a variable or string by itself in a single line of Python code to write it to the app
+magicEnabled = true
+
+# Run the Python Garbage Collector after each script execution
+postScriptGC = true
+
+# Handle script rerun requests immediately, rather than waiting for script to reach a yield point
+fastReruns = true
+
+[client]
+# Displays a toolbar in the upper-right corner of the app
+toolbarMode = "auto"
+
+# Controls whether uncaught app exceptions are displayed in the browser
+showErrorDetails = true
+
+# Change the visibility of items in the toolbar, options menu, and settings dialog
+showSidebarNavigation = true
+
+[ui]
+# Hide the hamburger menu
+hideTopBar = false
