@@ -218,6 +218,19 @@ CRITICAL AGENT RULES:
 4. DO NOT call the same tool twice unless user asks differently
 5. Be conversational and helpful
 
+TOOL CALLING FORMAT - CRITICAL FOR SUCCESS:
+1. Call ONE tool at a time - never attempt multiple tool calls in a single response
+2. After the first tool executes, the system will call you again to decide on next steps
+3. Do NOT try to call search_restaurants AND make_reservation in one response
+4. Do NOT try to call get_availability AND cancel_reservation in one response
+5. When unsure if a tool can do what user asks, call it - the system handles errors gracefully
+6. Never output tool calls as plain JSON - let the system format them correctly
+
+SEQUENTIAL TOOL CALLING:
+- First request: User asks for action → You call ONE tool → Tool results returned
+- Next request: Based on results → You call another tool if needed → Continue
+- This multi-turn approach ensures reliable tool execution
+
 REMEMBER: Every space matters. Write naturally with proper English spacing."""
     }
     
@@ -250,6 +263,17 @@ REMEMBER: Every space matters. Write naturally with proper English spacing."""
         Yields:
             Response chunks (text or status updates)
         """
+        # Support explicit command syntax (e.g., /cancel <id>) so tool calls always
+        # show up in the tooltip even if the LLM refuses to emit a function call.
+        direct_command = self._parse_direct_tool_command(user_message)
+        if direct_command:
+            self.conversation_history.append({
+                "role": "user",
+                "content": user_message
+            })
+            yield from self._execute_direct_tool_command(*direct_command)
+            return
+
         # Quick pre-check for out-of-context or ambiguous follow-ups.
         # If detected, return a short clarifying response locally without
         # calling the LLM or tools. This avoids unnecessary tool calls for
@@ -291,6 +315,35 @@ REMEMBER: Every space matters. Write naturally with proper English spacing."""
                     tools=tools_for_this_call,
                     stream=False
                 )
+                
+                # Check for tool call generation failure from Cerebras
+                if response.get("_tool_call_failed"):
+                    error_msg = response.get("_tool_call_error", "")
+                    yield "⚠️ I encountered an issue generating tool calls. This usually happens when the request is too complex. Let me try a simpler approach..."
+                    
+                    # Add the user message to history if not already there
+                    if not any(msg.get("role") == "user" and msg.get("content") == user_message for msg in self.conversation_history):
+                        self.conversation_history.append({
+                            "role": "user",
+                            "content": user_message
+                        })
+                    
+                    # Try once more without tools - let the model respond conversationally
+                    if iteration < max_iterations - 1:
+                        iteration += 1
+                        response = self.client.create_chat_completion(
+                            messages=self.conversation_history,
+                            tools=None,  # Don't use tools this round
+                            stream=False
+                        )
+                    else:
+                        final_response = "I apologize, but I'm having trouble processing your request at the moment. Please try rephrasing your question or use the direct command format (e.g., /cancel <reservation_id>) for cancellations."
+                        self.conversation_history.append({
+                            "role": "assistant",
+                            "content": final_response
+                        })
+                        yield final_response
+                        break
                 
                 # Check if LLM wants to call tools
                 if "choices" in response and len(response["choices"]) > 0:
@@ -444,6 +497,39 @@ REMEMBER: Every space matters. Write naturally with proper English spacing."""
         
         except Exception as e:
             return f"Error executing {tool_name}: {str(e)}"
+
+    def _parse_direct_tool_command(self, user_message: str) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """Return (tool_name, arguments) if the user used a slash/bang command."""
+        if not user_message:
+            return None
+
+        message = user_message.strip()
+        pattern = r"^(?:/|!)(?:cancel|cancel_reservation)\s+([a-zA-Z0-9-]{3,})$"
+        match = re.match(pattern, message, re.IGNORECASE)
+        if match:
+            reservation_id = match.group(1)
+            return "cancel_reservation", {"reservation_id": reservation_id}
+
+        return None
+
+    def _execute_direct_tool_command(self, tool_name: str, arguments: Dict[str, Any]) -> Generator[Any, None, None]:
+        """Execute a tool immediately when triggered by a direct command."""
+        status_message = f"Using tools: {tool_name}..."
+        yield status_message
+
+        result = self._execute_tool(tool_name, arguments)
+        yield {
+            "tool_name": tool_name,
+            "arguments": arguments,
+            "result": result
+        }
+
+        final_message = result or f"{tool_name} completed."
+        self.conversation_history.append({
+            "role": "assistant",
+            "content": final_message
+        })
+        yield final_message
 
     def _is_out_of_context(self, user_message: str) -> Tuple[bool, Optional[str]]:
         """

@@ -87,6 +87,23 @@ class CerebrasClient:
             return self._format_response(response)
         
         except Exception as e:
+            error_str = str(e)
+            # Check for tool_use_failed error from Cerebras
+            if "tool_use_failed" in error_str or "No valid function calls generated" in error_str:
+                # Return a special response that indicates tool call failure
+                # This will be caught by the agent to provide user-friendly guidance
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "",
+                                "tool_calls": []
+                            }
+                        }
+                    ],
+                    "_tool_call_failed": True,
+                    "_tool_call_error": error_str
+                }
             raise Exception(f"Cerebras API request failed: {str(e)}")
     
     def _stream_completion(
