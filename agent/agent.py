@@ -5,8 +5,9 @@ This module implements the core agent loop with tool calling capabilities
 for managing restaurant reservations through natural language interactions.
 """
 
-from typing import Any, Dict, List, Generator, Optional
-from agent.openrouter_client import OpenRouterClient
+from typing import Any, Dict, List, Generator, Optional, Tuple
+import re
+from agent.cerebras_client import CerebrasClient
 from mcp_server.server import MCPServer
 
 
@@ -175,31 +176,65 @@ class ReservationAgent:
         "role": "system",
         "content": """You are a helpful restaurant reservation assistant. Your role is to help users find restaurants, check availability, make reservations, and get recommendations.
 
-CRITICAL RULES:
-1. Use the available tools to gather information when needed
-2. After receiving tool results, YOU MUST provide a clear, natural language response to the user
-3. NEVER stop after calling a tool - always interpret the results and respond to the user
-4. Do NOT call the same tool multiple times unless the user asks for different criteria
-5. Format restaurant information in a readable way with key details
-6. For recommendations, present the top restaurants with their ratings, cuisine, and location
+SCOPE ENFORCEMENT - CRITICAL:
+1. ONLY answer questions related to restaurants, reservations, dining, and food
+2. If asked about topics outside your scope (weather, sports, general knowledge, personal information, etc.), politely refuse and redirect:
+   - Example: "I'm a restaurant reservation assistant and can only help with finding restaurants and making reservations. Is there a restaurant you'd like to search for?"
+3. DO NOT call tools for out-of-scope queries
+4. If unsure whether a query is in scope, err on the side of asking clarifying questions about restaurant preferences
 
-Be conversational, helpful, and concise in your responses. Always complete your response to the user."""
+FORMATTING REQUIREMENTS - CRITICAL AND MANDATORY:
+1. ALWAYS use proper spacing and line breaks between information
+2. ALWAYS add a blank line between each restaurant (press Enter twice)
+3. NEVER remove spaces from restaurant names or addresses
+4. ALWAYS write out addresses with proper spacing: NOT "3572RiverRd,Downtown" BUT "3572 River Rd, Downtown"
+5. ALWAYS use **bold** (two asterisks) for restaurant names
+6. Use bullet points for information fields
+7. DO NOT concatenate words - always include spaces between words
+
+MANDATORY OUTPUT TEMPLATE FOR RESTAURANTS:
+Found these restaurants:
+
+**Restaurant Name**
+- Cuisine: Type
+- Location: City
+- Address: Full Address With Spaces
+- Rating: X.X / 5
+- Price Range: $ / $$ / $$$ / $$$$
+- Description: Full description with spaces
+
+**Next Restaurant Name**
+- Cuisine: Type
+- Location: City
+- Address: Full Address With Spaces
+- Rating: X.X / 5
+- Price Range: $ / $$ / $$$ / $$$$
+- Description: Full description with spaces
+
+CRITICAL AGENT RULES:
+1. Use tools to get restaurant information
+2. After tool returns results, format them exactly as shown above
+3. NEVER stop after a tool call - always provide your formatted response
+4. DO NOT call the same tool twice unless user asks differently
+5. Be conversational and helpful
+
+REMEMBER: Every space matters. Write naturally with proper English spacing."""
     }
     
-    def __init__(self, mcp_server: MCPServer, openrouter_client: OpenRouterClient):
+    def __init__(self, mcp_server: MCPServer, cerebras_client: CerebrasClient):
         """
         Initialize the Reservation Agent.
         
         Args:
             mcp_server: MCP Server instance for tool execution
-            openrouter_client: OpenRouter client for LLM interactions
+            cerebras_client: Cerebras client for LLM interactions
         """
         self.mcp_server = mcp_server
-        self.client = openrouter_client
+        self.client = cerebras_client
         # Initialize conversation history with system message
         self.conversation_history: List[Dict[str, Any]] = [self.SYSTEM_MESSAGE]
 
-    def process_message(self, user_message: str) -> Generator[str, None, None]:
+    def process_message(self, user_message: str) -> Generator[Any, None, None]:
         """
         Process a user message and yield response chunks.
         
@@ -215,6 +250,21 @@ Be conversational, helpful, and concise in your responses. Always complete your 
         Yields:
             Response chunks (text or status updates)
         """
+        # Quick pre-check for out-of-context or ambiguous follow-ups.
+        # If detected, return a short clarifying response locally without
+        # calling the LLM or tools. This avoids unnecessary tool calls for
+        # messages like "Any other recommendation" or "Can we have your name for the reservation".
+        out_of_context, clarifying_resp = self._is_out_of_context(user_message)
+        if out_of_context:
+            # Yield the clarifying response and add it to history as assistant
+            if clarifying_resp:
+                yield clarifying_resp
+                self.conversation_history.append({
+                    "role": "assistant",
+                    "content": clarifying_resp
+                })
+            return
+
         # Add user message to conversation history
         self.conversation_history.append({
             "role": "user",
@@ -224,16 +274,21 @@ Be conversational, helpful, and concise in your responses. Always complete your 
         # Agent loop - continue until we get a final text response
         max_iterations = 5  # Prevent infinite loops
         iteration = 0
+        tools_executed = False  # Track if we've executed tools
         
         try:
             while iteration < max_iterations:
                 iteration += 1
                 
+                # After tools are executed, don't allow more tool calls
+                # This prevents the LLM from trying to call tools again
+                tools_for_this_call = None if tools_executed else self.TOOLS
+                
                 # For tool calling rounds, use non-streaming
                 # For final response, use streaming
                 response = self.client.create_chat_completion(
                     messages=self.conversation_history,
-                    tools=self.TOOLS,
+                    tools=tools_for_this_call,
                     stream=False
                 )
                 
@@ -293,14 +348,18 @@ Be conversational, helpful, and concise in your responses. Always complete your 
                         # Add tool results to conversation history
                         self.conversation_history.extend(tool_messages)
                         
+                        # Mark that we've executed tools
+                        tools_executed = True
+                        
                         # Continue loop to get final response
                         continue
                     else:
                         # No tool calls, get streaming response for final answer
                         # Make a streaming call for the final response
+                        # Don't pass tools if we've already executed them
                         stream_response = self.client.create_chat_completion(
                             messages=self.conversation_history,
-                            tools=self.TOOLS,
+                            tools=None if tools_executed else self.TOOLS,
                             stream=True
                         )
                         
@@ -385,6 +444,54 @@ Be conversational, helpful, and concise in your responses. Always complete your 
         
         except Exception as e:
             return f"Error executing {tool_name}: {str(e)}"
+
+    def _is_out_of_context(self, user_message: str) -> Tuple[bool, Optional[str]]:
+        """
+        Heuristic to detect out-of-context or ambiguous short follow-ups that
+        shouldn't trigger tool calls. Returns (is_out_of_context, clarifying_response).
+
+        The heuristic covers common patterns like:
+        - "Any other recommendation", "Anything else?", "Any more recommendations?"
+        - Requests for the agent's personal name: "Can we have your name for the reservation?"
+        - Very short inputs that look like follow-ups without enough context
+
+        This is intentionally conservative: if unsure, it returns False so the
+        LLM flow remains in charge.
+        """
+        if not user_message or not user_message.strip():
+            return True, "Could you please clarify your request? I didn't catch that."
+
+        msg = user_message.strip().lower()
+
+        # Pattern: generic follow-up asking for more recommendations/suggestions
+        # This should ONLY match vague follow-ups like "Any other recommendation?" 
+        # NOT initial requests like "Recommend me some Indian restaurants"
+        more_reco_pattern = re.compile(r"^(any|anything|anymore|any other|anything else|more)\b.*\b(recommendation|recommendations|suggestions)")
+        if more_reco_pattern.search(msg):
+            # If the conversation already contains recommendation results, ask
+            # whether they want more of the same or different preferences.
+            prev_has_reco = any("recommend" in (m.get("content") or "").lower() for m in self.conversation_history)
+            if prev_has_reco:
+                return True, ("Do you want more recommendations similar to the ones I showed earlier, "
+                              "or would you like to change your preferences (cuisine, location, price)?")
+            else:
+                # Even without previous recommendations, if it starts with vague words, ask for specifics
+                return True, "What kind of recommendations are you looking for? Cuisine, location, or price range?"
+
+        # Pattern: asking for the agent's name or personal info
+        name_pattern = re.compile(r"\b(your name|your full name|who are you)\b")
+        if name_pattern.search(msg):
+            return True, ("I don't have a personal name. If you'd like to make a reservation, "
+                          "please provide the customer's full name to use for the booking.")
+
+        # Very short follow-ups without nouns (e.g., "Also?", "And?", "More?")
+        tokens = re.findall(r"\w+", msg)
+        if len(tokens) <= 2 and (msg.endswith("?") or len(msg) < 15):
+            # If it's clearly a continuation and there is insufficient context,
+            # ask for clarification.
+            return True, "Could you please provide a bit more detail so I can help? For example, which cuisine or area are you interested in?"
+
+        return False, None
     
     def _parse_and_execute_tools(self, tool_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """

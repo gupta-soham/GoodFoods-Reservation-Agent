@@ -1,6 +1,6 @@
 # 🍽️ GoodFoods Reservation Agent
 
-A conversational AI agent for restaurant discovery and reservation management, built with Streamlit and powered by OpenRouter's LLM API.
+A conversational AI agent for restaurant discovery and reservation management, built with Streamlit and powered by Cerebras Cloud API.
 
 ## Features
 
@@ -8,15 +8,45 @@ A conversational AI agent for restaurant discovery and reservation management, b
 - **Smart Recommendations**: Get personalized restaurant suggestions based on your preferences
 - **Real-time Availability**: Check restaurant availability and get alternative time slots
 - **Easy Reservations**: Make and cancel reservations through natural conversation
-- **Streaming Responses**: Experience smooth, real-time AI responses with minimal animations
+- **Streaming Responses**: Experience smooth, real-time AI responses with adjustable speed (Slow/Normal/Fast)
+- **Minimal Thinking Indicator**: Clean post-tool animation showing AI is processing
 - **Tool Calling**: Leverages Model Context Protocol (MCP) for structured tool execution
+- **Fast Inference**: Powered by Cerebras Cloud for ultra-fast LLM responses
+
+## UI Features
+
+### Speed Control
+
+In the top-right corner, use the "Speed" dropdown to control streaming speed:
+
+- **Slow**: Leisurely, easy-to-read word-by-word streaming
+- **Normal** (default): Balanced streaming speed for natural conversation
+- **Fast**: Quick streaming for faster interactions
+
+### Tool Calling Visualization
+
+When the agent uses tools, a "View tool calls" expander appears with:
+
+- Live, pulsing badge for the currently executing tool
+- Tool arguments displayed as formatted JSON
+- Tool results rendered with full Markdown support
+
+### Thinking Indicator
+
+After tools complete execution:
+
+- A minimal "Thinking …" indicator appears briefly
+- Automatically disappears when the assistant begins streaming the response
+- Provides visual feedback during the transition from tool execution to response generation
+
+All assistant responses and tool results support full Markdown formatting, including code blocks, lists, tables, and emphasis.
 
 ## Architecture
 
 The application consists of four main components:
 
 1. **Streamlit Frontend** (`app.py`): Clean, professional chat interface
-2. **Reservation Agent** (`agent/`): Custom agent loop with tool calling capabilities
+2. **Reservation Agent** (`agent/`): Custom agent loop with tool calling capabilities using Cerebras llama-3.3-70b
 3. **MCP Server** (`mcp_server/`): JSON-RPC 2.0 server providing restaurant tools and resources
 4. **Restaurant Database** (`database/`): In-memory database with seed data
 
@@ -25,7 +55,7 @@ The application consists of four main components:
 ### Prerequisites
 
 - Python 3.8 or higher
-- OpenRouter API key ([Get one here](https://openrouter.ai/keys))
+- Cerebras API key ([Get one here](https://cloud.cerebras.ai/))
 
 ### Installation
 
@@ -60,11 +90,17 @@ The application consists of four main components:
    # Copy the example file
    cp .env.example .env
 
-   # Edit .env and add your OpenRouter API key
-   OPENROUTER_API_KEY=your_api_key_here
+   # Edit .env and add your Cerebras API key
+   CEREBRAS_API_KEY=your_api_key_here
    ```
 
-5. **Run the application**
+5. **Test the Cerebras integration (optional)**
+
+   ```bash
+   python test_cerebras.py
+   ```
+
+6. **Run the application**
    ```bash
    streamlit run app.py
    ```
@@ -117,7 +153,7 @@ goodfoods-reservation-agent/
 ├── agent/
 │   ├── __init__.py
 │   ├── agent.py              # Core agent with tool calling loop
-│   └── openrouter_client.py  # OpenRouter API client
+│   └── cerebras_client.py    # Cerebras API client
 ├── mcp_server/
 │   ├── __init__.py
 │   └── server.py             # MCP Server implementation
@@ -130,8 +166,10 @@ goodfoods-reservation-agent/
 ├── .streamlit/
 │   └── config.toml           # Streamlit configuration
 ├── app.py                    # Main Streamlit application
+├── test_cerebras.py          # Test script for Cerebras integration
 ├── requirements.txt          # Python dependencies
 ├── .env.example              # Environment variable template
+├── CEREBRAS_MIGRATION.md     # Migration guide
 ├── .gitignore
 └── README.md
 ```
@@ -140,12 +178,12 @@ goodfoods-reservation-agent/
 
 ### API Key Issues
 
-**Problem**: "OpenRouter API Key Not Found" error
+**Problem**: "Cerebras API Key Not Found" error
 
 **Solution**:
 
 - Ensure you've created a `.env` file (not `.env.example`)
-- Verify your API key is correctly set: `OPENROUTER_API_KEY=sk-or-...`
+- Verify your API key is correctly set: `CEREBRAS_API_KEY=csk-...`
 - Restart the Streamlit application after updating `.env`
 
 ### Connection Errors
@@ -155,7 +193,7 @@ goodfoods-reservation-agent/
 **Solution**:
 
 - Check your internet connection
-- Verify your API key is valid at [OpenRouter](https://openrouter.ai/keys)
+- Verify your API key is valid at [Cerebras Cloud](https://cloud.cerebras.ai/)
 - Check if you have API credits remaining
 
 ### Rate Limiting
@@ -173,17 +211,17 @@ goodfoods-reservation-agent/
 
 **Solution**:
 
-- The free tier model may have slower response times during peak usage
+- Cerebras is known for fast inference, but network latency can affect response times
 - Try simplifying your query
-- Consider using a paid model for faster responses
+- Check your internet connection
 
 ## Technology Stack
 
 - **Frontend**: Streamlit 1.28+
-- **LLM Provider**: OpenRouter (meta-llama/llama-3.3-70b-instruct:free)
+- **LLM Provider**: Cerebras Cloud (llama-3.3-70b)
 - **Protocol**: Model Context Protocol (MCP) with JSON-RPC 2.0
 - **Language**: Python 3.8+
-- **HTTP Client**: Requests library
+- **SDK**: Cerebras Cloud SDK for Python
 
 ## License
 
