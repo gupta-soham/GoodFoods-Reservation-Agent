@@ -234,9 +234,6 @@ Contributions are welcome! Please see [CONTRIBUTING.md](docs/CONTRIBUTING.md) fo
 ## Documentation
 
 - [API Reference](docs/API_REFERENCE.md) - Detailed API documentation
-- [Architecture Guide](docs/ARCHITECTURE.md) - System design and architecture
+- [Business Strategy](docs/BUSINESS_STRATEGY.md) - System design and architecture
 - [Tool Calling Guide](docs/TOOL_CALLING_GUIDE.md) - How tool calling works
 - [MCP Protocol](docs/MCP_PROTOCOL.md) - MCP implementation details
-- [Deployment Guide](docs/DEPLOYMENT.md) - Deployment instructions
-- [Test Results](docs/TEST_RESULTS.md) - Testing documentation and results
-- [Project Summary](PROJECT_COMPLETION_SUMMARY.md) - Complete project overview
